@@ -1,0 +1,49 @@
+<?php /** @var array $config */ ?>
+<div class="panel">
+  <h2>TMT-Translate 配置</h2>
+  <form method="post">
+    <label>SecretId<br>
+      <input type="text" name="secret_id" value="<?php echo htmlspecialchars($config['SecretId'] ?? ''); ?>" style="width:100%;">
+    </label>
+    <br>
+    <label>SecretKey<br>
+      <input type="text" name="secret_key" value="<?php echo htmlspecialchars($config['SecretKey'] ?? ''); ?>" style="width:100%;">
+    </label>
+    <br>
+    <label>Region<br>
+      <input type="text" name="region" value="<?php echo htmlspecialchars($config['Region'] ?? 'ap-guangzhou'); ?>">
+    </label>
+    <br>
+    <label>Endpoint (e.g. tmt.tencentcloudapi.com)<br>
+      <input type="text" name="endpoint" value="<?php echo htmlspecialchars($config['Endpoint'] ?? 'tmt.tencentcloudapi.com'); ?>">
+    </label>
+    <br><br>
+
+    <label>选择要翻译的订阅源（可多选）<br>
+      <select name="selected_feeds[]" multiple size="10" style="width:100%;">
+        <?php
+        $selected = $config['SelectedFeeds'] ?? [];
+        if (!empty($feeds)) {
+          foreach ($feeds as $f) {
+            $fid = htmlspecialchars((string)($f['id'] ?? ''));
+            $title = htmlspecialchars((string)($f['title'] ?? $fid));
+            $is = in_array((string)$fid, $selected, true) ? ' selected' : '';
+            echo "<option value=\"{$fid}\"{$is}>{$title} ({$fid})</option>";
+          }
+        } else {
+          echo '<option disabled>无法自动加载订阅源；请使用下方手动输入或检查 FreshRSS 环境</option>';
+        }
+        ?>
+      </select>
+    </label>
+    <br><br>
+
+    <label>手动输入订阅源匹配（回退方案；逗号分隔，保留兼容旧版）<br>
+      <input type="text" name="feeds_manual" value="<?php echo htmlspecialchars($config['FeedsManual'] ?? ''); ?>" style="width:100%;">
+    </label>
+    <br><br>
+
+    <button type="submit" class="btn">保存</button>
+  </form>
+  <p>提示：如果界面未列出订阅源，说明当前 FreshRSS 环境中未暴露期望的 `FreshRSS_Feed::all()` 接口，仍可使用手动输入。</p>
+</div>
