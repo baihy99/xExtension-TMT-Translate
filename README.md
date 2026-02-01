@@ -12,6 +12,7 @@
 ## 安装步骤
 1. 将本扩展目录`xExtension-TMT-Translate`放入FreshRSS的`extensions/`目录下；
 ```bash
+cd /var/www/FreshRSS/extensions
 sudo git clone https://github.com/baihy99/xExtension-TMT-Translate.git
 sudo chmod -R 775 /var/www/FreshRSS/extensions/xExtension-TMT-Translate
 sudo chown -R www-data:freshrss /var/www/FreshRSS/extensions/xExtension-TMT-Translate
