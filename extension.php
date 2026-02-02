@@ -1,196 +1,346 @@
 <?php
 
-final class TMTTranslateExtension extends Minz_Extension {
-    #[\Override]
-    public function init(): void {
+final class TMTTranslateExtension extends Minz_Extension
+{
+    public function init(): void
+    {
         parent::init();
-
-        $this->registerHook(Minz_HookType::EntryBeforeDisplay, [$this, 'onEntryBeforeDisplay'], 0);
+        $this->registerHook('entry_before_display', [$this, 'onEntryBeforeDisplay'], 0);
         $this->registerHook('menu_configuration_entry', [$this, 'menuConfigurationEntry']);
-        $this->registerHook('api_misc', [$this, 'apiMisc']);
     }
 
-    public function menuConfigurationEntry(): string {
-        $url = Minz_URL::absolute("?tab=extensions&ext=" . rawurlencode($this->getName()));
+    public function install(): bool
+    {
+        $dbConfig = FreshRSS_Context::systemConf()->db;
+        $prefix = $dbConfig['prefix'] ?? '';
+        $dbType = $dbConfig['type'] ?? 'mysql';
+
+        $sqlStatements = $this->getCreateTableSQL($prefix, $dbType);
+
+        try {
+            $dao = new TMTTranslateDAO();
+            foreach ($sqlStatements as $sql) {
+                $dao->exec($sql);
+            }
+            return true;
+        } catch (\Throwable $e) {
+            if (class_exists('Minz_Log')) {
+                Minz_Log::error('TMT-Translate install failed: ' . $e->getMessage());
+            }
+            return false;
+        }
+    }
+
+    public function uninstall(): bool
+    {
+        $dbConfig = FreshRSS_Context::systemConf()->db;
+        $prefix = $dbConfig['prefix'] ?? '';
+        $dbType = $dbConfig['type'] ?? 'mysql';
+
+        $tableName = $this->getTableName($prefix, $dbType);
+        $sql = "DROP TABLE IF EXISTS {$tableName}";
+
+        try {
+            $dao = new TMTTranslateDAO();
+            $dao->exec($sql);
+            return true;
+        } catch (\Throwable $e) {
+            if (class_exists('Minz_Log')) {
+                Minz_Log::error('TMT-Translate uninstall failed: ' . $e->getMessage());
+            }
+            return false;
+        }
+    }
+
+    private function getTableName(string $prefix, string $dbType): string
+    {
+        if ($dbType === 'sqlite') {
+            return "`{$prefix}tmt_translate_cache`";
+        }
+        return "`{$prefix}_tmt_translate_cache`";
+    }
+
+    private function getCreateTableSQL(string $prefix, string $dbType): array
+    {
+        $tableName = $this->getTableName($prefix, $dbType);
+
+        if ($dbType === 'pgsql') {
+            return [
+                "CREATE TABLE IF NOT EXISTS {$tableName} (
+                    id SERIAL PRIMARY KEY,
+                    entry_id VARCHAR(255) NOT NULL,
+                    user_id VARCHAR(50) NOT NULL,
+                    feed_id VARCHAR(50) NOT NULL,
+                    original_title TEXT,
+                    translated_title TEXT,
+                    original_content TEXT,
+                    translated_content TEXT,
+                    created_at BIGINT DEFAULT 0,
+                    updated_at BIGINT DEFAULT 0
+                )",
+                "CREATE INDEX IF NOT EXISTS tmt_entry_id_index ON {$tableName} (entry_id)",
+                "CREATE INDEX IF NOT EXISTS tmt_user_feed_index ON {$tableName} (user_id, feed_id)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS tmt_entry_user_unique ON {$tableName} (entry_id, user_id)"
+            ];
+        } elseif ($dbType === 'sqlite') {
+            return [
+                "CREATE TABLE IF NOT EXISTS {$tableName} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    entry_id VARCHAR(255) NOT NULL,
+                    user_id VARCHAR(50) NOT NULL,
+                    feed_id VARCHAR(50) NOT NULL,
+                    original_title TEXT,
+                    translated_title TEXT,
+                    original_content TEXT,
+                    translated_content TEXT,
+                    created_at BIGINT DEFAULT 0,
+                    updated_at BIGINT DEFAULT 0
+                )",
+                "CREATE INDEX IF NOT EXISTS tmt_entry_id_index ON {$tableName} (entry_id)",
+                "CREATE INDEX IF NOT EXISTS tmt_user_feed_index ON {$tableName} (user_id, feed_id)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS tmt_entry_user_unique ON {$tableName} (entry_id, user_id)"
+            ];
+        } else {
+            return [
+                "CREATE TABLE IF NOT EXISTS {$tableName} (
+                    id INT NOT NULL AUTO_INCREMENT,
+                    entry_id VARCHAR(255) NOT NULL,
+                    user_id VARCHAR(50) NOT NULL,
+                    feed_id VARCHAR(50) NOT NULL,
+                    original_title TEXT,
+                    translated_title TEXT,
+                    original_content LONGTEXT,
+                    translated_content LONGTEXT,
+                    created_at BIGINT DEFAULT 0,
+                    updated_at BIGINT DEFAULT 0,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY (entry_id, user_id),
+                    INDEX (entry_id),
+                    INDEX (user_id, feed_id)
+                ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE=INNODB"
+            ];
+        }
+    }
+
+    public function menuConfigurationEntry(): string
+    {
+        $url = '?tab=extensions&ext=' . rawurlencode($this->getName());
         return "<li class=\"item\"><a href=\"{$url}\">TMT-Translate</a></li>";
     }
 
-    public function handleConfigureAction(): void {
-        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-            $cfg = $this->getSystemConfiguration();
-            $cfg['SecretId'] = trim($_POST['secret_id'] ?? '');
-            $cfg['SecretKey'] = trim($_POST['secret_key'] ?? '');
-            $cfg['Region'] = trim($_POST['region'] ?? 'ap-guangzhou');
-            $cfg['Endpoint'] = trim($_POST['endpoint'] ?? 'tmt.tencentcloudapi.com');
-            // selected_feeds is an array of feed ids (strings); store as JSON
-            $selected = $_POST['selected_feeds'] ?? [];
-            if (is_array($selected)) {
-                $cfg['SelectedFeeds'] = array_values($selected);
-            } else {
-                $cfg['SelectedFeeds'] = [];
-            }
-            // Backwards-compat: also accept manual feeds text
-            $cfg['FeedsManual'] = trim($_POST['feeds_manual'] ?? '');
-            $this->setSystemConfiguration($cfg);
-        }
+    public function handleConfigureAction(): void
+    {
+        if (Minz_Request::isPost()) {
+            $cfg = FreshRSS_Context::$user_conf;
+            if ($cfg === null) return;
 
-        $config = $this->getSystemConfiguration();
-        // Try to load feeds for the configure view: attempt several methods, gracefully fallback.
-        $feeds = [];
-        try {
-            if (class_exists('FreshRSS_Feed')) {
-                // Try common methods (best-effort)
-                if (method_exists('FreshRSS_Feed', 'all')) {
-                    $all = FreshRSS_Feed::all();
-                    foreach ($all as $f) {
-                        $feeds[] = ['id' => $f->id ?? $f['id'] ?? '', 'title' => $f->title ?? $f['name'] ?? $f['url'] ?? ''];
-                    }
-                } elseif (method_exists('FreshRSS_Feed', 'getAll')) {
-                    $all = FreshRSS_Feed::getAll();
-                    foreach ($all as $f) {
-                        $feeds[] = ['id' => $f->id ?? $f['feed_id'] ?? '', 'title' => $f->title ?? $f['name'] ?? $f['url'] ?? ''];
-                    }
-                }
-            }
-        } catch (\Throwable $e) {
-            // ignore; template will fallback to manual input
-        }
+            $cfg->TMTTranslateSecretId = Minz_Request::param('secret_id', '');
+            $cfg->TMTTranslateSecretKey = Minz_Request::param('secret_key', '');
+            $cfg->TMTTranslateRegion = Minz_Request::param('region', 'ap-guangzhou');
+            $cfg->TMTTranslateEndpoint = Minz_Request::param('endpoint', 'tmt.tencentcloudapi.com');
+            $cfg->TMTTranslateContent = Minz_Request::param('translate_content', '0') === '1';
 
-        include $this->getPath() . '/configure.phtml';
-    }
-
-    // Minimal misc API to return feeds as JSON if needed by JS
-    public function apiMisc(): void {
-        if (!isset($_GET['ext']) || $_GET['ext'] !== $this->getName()) {
-            return;
-        }
-        $action = $_GET['action'] ?? '';
-        if ($action === 'listFeeds') {
-            $feeds = [];
-            try {
-                if (class_exists('FreshRSS_Feed')) {
-                    if (method_exists('FreshRSS_Feed', 'all')) {
-                        $all = FreshRSS_Feed::all();
-                        foreach ($all as $f) {
-                            $feeds[] = ['id' => $f->id ?? $f['id'] ?? '', 'title' => $f->title ?? $f['name'] ?? $f['url'] ?? ''];
-                        }
-                    }
-                }
-            } catch (\Throwable $e) {
-                // ignore
+            $selectedFeeds = Minz_Request::param('TMTTranslateFeeds', []);
+            if (!is_array($selectedFeeds)) {
+                $selectedFeeds = [];
             }
-            header('Content-Type: application/json');
-            echo json_encode(['feeds' => $feeds]);
-            exit;
+            $cfg->TMTTranslateFeeds = array_fill_keys(array_keys($selectedFeeds), '1');
+
+            $cfg->save();
         }
     }
 
-    public function onEntryBeforeDisplay($entry) {
+    public function onEntryBeforeDisplay($entry)
+    {
         try {
-            if (!is_object($entry)) {
-                return $entry;
-            }
-            $config = $this->getSystemConfiguration();
-            $selected = $config['SelectedFeeds'] ?? [];
-            $manual = isset($config['FeedsManual']) ? array_filter(array_map('trim', explode(',', $config['FeedsManual']))) : [];
+            if (!is_object($entry)) return $entry;
+
+            $cfg = FreshRSS_Context::$user_conf;
+            if ($cfg === null) return $entry;
+
+            $selectedFeeds = $cfg->TMTTranslateFeeds ?? [];
+            if (!is_array($selectedFeeds)) $selectedFeeds = [];
 
             $feedId = null;
-            if (property_exists($entry, 'feed') && is_object($entry->feed)) {
-                $feedId = $entry->feed->id ?? ($entry->feed->feed_id ?? null);
-            }
-            if ($feedId === null && method_exists($entry, 'getFeed')) {
-                $f = $entry->getFeed();
-                if (is_object($f)) {
-                    $feedId = $f->id ?? ($f->feed_id ?? null);
+            if (method_exists($entry, 'feed')) {
+                $feed = $entry->feed();
+                if (is_object($feed) && method_exists($feed, 'id')) {
+                    $feedId = $feed->id();
                 }
             }
+            if ($feedId === null) return $entry;
 
-            $shouldTranslate = false;
-            if ($feedId !== null && in_array((string)$feedId, $selected, true)) {
-                $shouldTranslate = true;
-            }
-            // fallback: manual patterns (legacy)
-            if (!$shouldTranslate && !empty($manual)) {
-                $feedIdentifier = $entry->feed->url ?? $entry->feed->link ?? $entry->feed_url ?? null;
-                if ($feedIdentifier !== null) {
-                    foreach ($manual as $pattern) {
-                        if ($pattern === '') continue;
-                        if (stripos($feedIdentifier, $pattern) !== false || $feedIdentifier === $pattern) {
-                            $shouldTranslate = true;
-                            break;
-                        }
-                    }
-                }
+            if (!isset($selectedFeeds[$feedId]) || $selectedFeeds[$feedId] !== '1') {
+                return $entry;
             }
 
-            if (!$shouldTranslate) return $entry;
-
-            $secretId = $config['SecretId'] ?? '';
-            $secretKey = $config['SecretKey'] ?? '';
-            $region = $config['Region'] ?? 'ap-guangzhou';
-            $endpoint = $config['Endpoint'] ?? 'tmt.tencentcloudapi.com';
+            $secretId = $cfg->TMTTranslateSecretId ?? '';
+            $secretKey = $cfg->TMTTranslateSecretKey ?? '';
+            $region = $cfg->TMTTranslateRegion ?? 'ap-guangzhou';
+            $endpoint = $cfg->TMTTranslateEndpoint ?? 'tmt.tencentcloudapi.com';
             if (empty($secretId) || empty($secretKey)) return $entry;
+
+            $entryId = method_exists($entry, 'id') ? $entry->id() : null;
+            if ($entryId === null) return $entry;
+
+            $cached = $this->getTranslationFromCache($entryId, $feedId);
+
+            if ($cached) {
+                if (!empty($cached['translated_title'])) {
+                    if (method_exists($entry, '_title')) $entry->_title('[译] ' . $cached['translated_title']);
+                    else $entry->title = '[译] ' . $cached['translated_title'];
+                }
+
+                $translateContent = $cfg->TMTTranslateContent ?? false;
+                if ($translateContent && !empty($cached['translated_content'])) {
+                    if (method_exists($entry, '_content')) $entry->_content($cached['translated_content']);
+                    else $entry->content = $cached['translated_content'];
+                }
+                return $entry;
+            }
 
             $client = new TMTClient($secretId, $secretKey, $region, $endpoint);
 
-            // title
+            $translatedTitle = null;
+            $translatedContent = null;
+
             $title = method_exists($entry, 'title') ? $entry->title() : ($entry->title ?? '');
             if (!empty($title)) {
                 $translatedTitle = $client->translate($title, 'en', 'zh');
                 if ($translatedTitle !== null) {
-                    if (method_exists($entry, '_title')) {
-                        $entry->_title('[译] ' . $translatedTitle);
-                    } else {
-                        $entry->title = '[译] ' . $translatedTitle;
+                    if (method_exists($entry, '_title')) $entry->_title('[译] ' . $translatedTitle);
+                    else $entry->title = '[译] ' . $translatedTitle;
+                }
+            }
+
+            $translateContent = $cfg->TMTTranslateContent ?? false;
+            if ($translateContent) {
+                $content = method_exists($entry, 'content') ? $entry->content() : ($entry->content ?? '');
+                if (!empty($content)) {
+                    $translatedContent = $client->translate(strip_tags($content), 'en', 'zh');
+                    if ($translatedContent !== null) {
+                        if (method_exists($entry, '_content')) $entry->_content($translatedContent);
+                        else $entry->content = $translatedContent;
                     }
                 }
             }
 
-            // content
-            $content = method_exists($entry, 'content') ? $entry->content() : ($entry->content ?? '');
-            if (!empty($content)) {
-                $translatedContent = $client->translate(strip_tags($content), 'en', 'zh');
-                if ($translatedContent !== null) {
-                    if (method_exists($entry, '_content')) {
-                        $entry->_content($translatedContent);
-                    } else {
-                        $entry->content = $translatedContent;
-                    }
-                }
-            }
+            $this->saveTranslationToCache($entryId, $feedId, $title, $translatedTitle, $content ?? '', $translatedContent);
         } catch (\Throwable $e) {
-            if (class_exists('Minz_Log')) {
-                Minz_Log::warning('TMT-Translate: ' . $e->getMessage());
-            } else {
-                error_log('TMT-Translate: ' . $e->getMessage());
-            }
+            if (class_exists('Minz_Log')) Minz_Log::warning('TMT-Translate: ' . $e->getMessage());
+            else error_log('TMT-Translate: ' . $e->getMessage());
         }
         return $entry;
     }
+
+    private function getTranslationFromCache(string $entryId, string $feedId): ?array
+    {
+        try {
+            $dao = new TMTTranslateDAO();
+            $dbConfig = FreshRSS_Context::systemConf()->db;
+            $prefix = $dbConfig['prefix'] ?? '';
+            $dbType = $dbConfig['type'] ?? 'mysql';
+            $userId = Minz_User::name() ?? '';
+
+            $tableName = $this->getTableName($prefix, $dbType);
+            $stmt = $dao->prepare("SELECT * FROM {$tableName} WHERE entry_id = ? AND user_id = ?");
+            $stmt->execute([$entryId, $userId]);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            return $result ?: null;
+        } catch (\Throwable $e) {
+            if (class_exists('Minz_Log')) Minz_Log::warning('TMT-Translate cache read error: ' . $e->getMessage());
+            else error_log('TMT-Translate cache read error: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    private function saveTranslationToCache(string $entryId, string $feedId, string $originalTitle, ?string $translatedTitle, string $originalContent, ?string $translatedContent): void
+    {
+        try {
+            $dao = new TMTTranslateDAO();
+            $dbConfig = FreshRSS_Context::systemConf()->db;
+            $prefix = $dbConfig['prefix'] ?? '';
+            $dbType = $dbConfig['type'] ?? 'mysql';
+            $userId = Minz_User::name() ?? '';
+
+            $tableName = $this->getTableName($prefix, $dbType);
+            $now = time();
+
+            if ($dbType === 'pgsql') {
+                $sql = "INSERT INTO {$tableName} 
+                        (entry_id, user_id, feed_id, original_title, translated_title, original_content, translated_content, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (entry_id, user_id) DO UPDATE SET
+                        translated_title = EXCLUDED.translated_title,
+                        translated_content = EXCLUDED.translated_content,
+                        updated_at = EXCLUDED.updated_at";
+                $stmt = $dao->prepare($sql);
+                $stmt->execute([$entryId, $userId, $feedId, $originalTitle, $translatedTitle, $originalContent, $translatedContent, $now, $now]);
+            } elseif ($dbType === 'sqlite') {
+                $sql = "INSERT OR REPLACE INTO {$tableName} 
+                        (id, entry_id, user_id, feed_id, original_title, translated_title, original_content, translated_content, created_at, updated_at)
+                        VALUES ((SELECT id FROM {$tableName} WHERE entry_id = ? AND user_id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                $stmt = $dao->prepare($sql);
+                $stmt->execute([$entryId, $userId, $entryId, $userId, $feedId, $originalTitle, $translatedTitle, $originalContent, $translatedContent, $now, $now]);
+            } else {
+                $sql = "INSERT INTO {$tableName} 
+                        (entry_id, user_id, feed_id, original_title, translated_title, original_content, translated_content, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON DUPLICATE KEY UPDATE
+                        translated_title = VALUES(translated_title),
+                        translated_content = VALUES(translated_content),
+                        updated_at = VALUES(updated_at)";
+                $stmt = $dao->prepare($sql);
+                $stmt->execute([$entryId, $userId, $feedId, $originalTitle, $translatedTitle, $originalContent, $translatedContent, $now, $now]);
+            }
+        } catch (\Throwable $e) {
+            if (class_exists('Minz_Log')) Minz_Log::warning('TMT-Translate cache write error: ' . $e->getMessage());
+            else error_log('TMT-Translate cache write error: ' . $e->getMessage());
+        }
+    }
 }
 
-// SDK / fallback client
-class TMTClient {
+class TMTClient
+{
     private string $secretId;
     private string $secretKey;
     private string $region;
     private string $endpoint;
     private string $service = 'tmt';
     private string $version = '2018-03-21';
+    private static float $lastRequestTime = 0;
+    private const MIN_INTERVAL = 0.25;
 
-    public function __construct(string $secretId, string $secretKey, string $region = 'ap-guangzhou', string $endpoint = 'tmt.tencentcloudapi.com') {
+    public function __construct(string $secretId, string $secretKey, string $region = 'ap-guangzhou', string $endpoint = 'tmt.tencentcloudapi.com')
+    {
         $this->secretId = $secretId;
         $this->secretKey = $secretKey;
         $this->region = $region;
         $this->endpoint = $endpoint;
+
         $autoload = __DIR__ . '/vendor/autoload.php';
         if (file_exists($autoload)) {
             require_once $autoload;
         }
     }
 
-    public function translate(string $text, string $source = 'en', string $target = 'zh'): ?string {
-        // Try official SDK first
+    private function applyRateLimit(): void
+    {
+        $now = microtime(true);
+        $elapsed = $now - self::$lastRequestTime;
+
+        if ($elapsed < self::MIN_INTERVAL) {
+            usleep((int)((self::MIN_INTERVAL - $elapsed) * 1000000));
+        }
+
+        self::$lastRequestTime = microtime(true);
+    }
+
+    public function translate(string $text, string $source = 'en', string $target = 'zh'): ?string
+    {
+        $this->applyRateLimit();
+
         if (class_exists('\\TencentCloud\\Tmt\\V20180321\\TmtClient')) {
             try {
                 $cred = new \TencentCloud\Common\Credential($this->secretId, $this->secretKey);
@@ -213,106 +363,22 @@ class TMTClient {
             } catch (\Throwable $e) {
                 if (class_exists('Minz_Log')) Minz_Log::warning('TMT-Translate SDK error: ' . $e->getMessage());
                 else error_log('TMT-Translate SDK error: ' . $e->getMessage());
-                // fall through to builtin implementation
             }
         }
 
-        // Fallback: TC3 signing + curl
-        $action = 'TextTranslate';
-        $payload = [
-            'SourceText' => mb_substr($text, 0, 5000),
-            'Source' => $source,
-            'Target' => $target,
-            'ProjectId' => 0,
-        ];
-        $jsonPayload = json_encode($payload, JSON_UNESCAPED_UNICODE);
-        $timestamp = time();
-        $date = gmdate('Y-m-d', $timestamp);
-        $host = $this->endpoint;
-
-        $canonicalUri = '/';
-        $canonicalQueryString = '';
-        $canonicalHeaders = "content-type:application/json\nhost:{$host}\n";
-        $signedHeaders = 'content-type;host';
-        $hashedRequestPayload = hash('sha256', $jsonPayload);
-
-        $canonicalRequest = implode("\n", [
-            'POST',
-            $canonicalUri,
-            $canonicalQueryString,
-            $canonicalHeaders,
-            $signedHeaders,
-            $hashedRequestPayload,
-        ]);
-
-        $algorithm = 'TC3-HMAC-SHA256';
-        $credentialScope = "{$date}/{$this->service}/tc3_request";
-        $hashedCanonicalRequest = hash('sha256', $canonicalRequest);
-        $stringToSign = implode("\n", [
-            $algorithm,
-            (string)$timestamp,
-            $credentialScope,
-            $hashedCanonicalRequest,
-        ]);
-
-        $kDate = hash_hmac('sha256', $date, 'TC3' . $this->secretKey, true);
-        $kService = hash_hmac('sha256', $this->service, $kDate, true);
-        $kSigning = hash_hmac('sha256', 'tc3_request', $kService, true);
-        $signature = hash_hmac('sha256', $stringToSign, $kSigning);
-
-        $authorization = sprintf(
-            "%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-            $algorithm,
-            $this->secretId,
-            $credentialScope,
-            $signedHeaders,
-            $signature
-        );
-
-        $headers = [
-            'Authorization: ' . $authorization,
-            'Content-Type: application/json; charset=utf-8',
-            'Host: ' . $host,
-            'X-TC-Action: ' . $action,
-            'X-TC-Version: ' . $this->version,
-            'X-TC-Timestamp: ' . $timestamp,
-            'X-TC-Region: ' . $this->region,
-        ];
-
-        $url = 'https://' . $host;
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonPayload);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-
-        $resp = curl_exec($ch);
-        $err = curl_error($ch);
-        curl_close($ch);
-
-        if ($resp === false || $err) {
-            if (class_exists('Minz_Log')) Minz_Log::warning('TMT-Translate HTTP error: ' . $err);
-            else error_log('TMT-Translate HTTP error: ' . $err);
-            return null;
-        }
-
-        $data = json_decode($resp, true);
-        if (!is_array($data)) {
-            if (class_exists('Minz_Log')) Minz_Log::warning('TMT-Translate invalid JSON response');
-            else error_log('TMT-Translate invalid JSON response');
-            return null;
-        }
-
-        if (isset($data['Response']['TargetText'])) return $data['Response']['TargetText'];
-        if (isset($data['TargetText'])) return $data['TargetText'];
-
-        if (isset($data['Response']['Error'])) {
-            $errInfo = $data['Response']['Error'];
-            $msg = sprintf('TMT API Error: Code=%s Message=%s', $errInfo['Code'] ?? '', $errInfo['Message'] ?? '');
-            if (class_exists('Minz_Log')) Minz_Log::warning($msg);
-            else error_log($msg);
-        }
         return null;
+    }
+}
+
+class TMTTranslateDAO extends Minz_ModelPdo
+{
+    public function exec(string $sql): int|false
+    {
+        return $this->pdo->exec($sql);
+    }
+
+    public function prepare(string $sql): PDOStatement|false
+    {
+        return $this->pdo->prepare($sql);
     }
 }
