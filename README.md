@@ -27,7 +27,7 @@ composer require tencentcloud/tmt --update-no-dev
 ```
 3. 登录FreshRSS后台，启用该扩展（配置→扩展→Tencent Translate→启用）；
 4. 修改腾讯云配置（SecretId/SecretKey/Region/Endpoint）；
-5. Region/Endpoint配置参考文档：https://cloud.tencent.com/product/tmt；
+5. Region/Endpoint配置参考文档「https://cloud.tencent.com/product/tmt」；
 6. 选择需要翻译的订阅源，以及是否需要翻译正文；
 7. 刷新RSS订阅，新拉取的文章将自动触发翻译。
 
