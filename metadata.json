@@ -1,7 +1,7 @@
 {
   "name": "TMT-Translate",
   "author": "Kerwin",
-  "description": "Automatically translates English article titles and content into Chinese using Tencent Cloud Translation API.",
+  "description": "Automatically translates English articles into Chinese using TMT API.",
   "version": "0.0.5",
   "entrypoint": "TMTTranslate",
   "type": "system"
