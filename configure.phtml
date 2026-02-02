@@ -1,49 +1,84 @@
-<?php /** @var array $config */ ?>
-<div class="panel">
-  <h2>TMT-Translate 配置</h2>
-  <form method="post">
-    <label>SecretId<br>
-      <input type="text" name="secret_id" value="<?php echo htmlspecialchars($config['SecretId'] ?? ''); ?>" style="width:100%;">
-    </label>
-    <br>
-    <label>SecretKey<br>
-      <input type="text" name="secret_key" value="<?php echo htmlspecialchars($config['SecretKey'] ?? ''); ?>" style="width:100%;">
-    </label>
-    <br>
-    <label>Region<br>
-      <input type="text" name="region" value="<?php echo htmlspecialchars($config['Region'] ?? 'ap-guangzhou'); ?>">
-    </label>
-    <br>
-    <label>Endpoint (e.g. tmt.tencentcloudapi.com)<br>
-      <input type="text" name="endpoint" value="<?php echo htmlspecialchars($config['Endpoint'] ?? 'tmt.tencentcloudapi.com'); ?>">
-    </label>
-    <br><br>
+<?php
+if (defined('TMT_TRANSLATE_CONFIG_RENDERED')) return;
+define('TMT_TRANSLATE_CONFIG_RENDERED', true);
 
-    <label>选择要翻译的订阅源（可多选）<br>
-      <select name="selected_feeds[]" multiple size="10" style="width:100%;">
-        <?php
-        $selected = $config['SelectedFeeds'] ?? [];
-        if (!empty($feeds)) {
-          foreach ($feeds as $f) {
-            $fid = htmlspecialchars((string)($f['id'] ?? ''));
-            $title = htmlspecialchars((string)($f['title'] ?? $fid));
-            $is = in_array((string)$fid, $selected, true) ? ' selected' : '';
-            echo "<option value=\"{$fid}\"{$is}>{$title} ({$fid})</option>";
-          }
-        } else {
-          echo '<option disabled>无法自动加载订阅源；请使用下方手动输入或检查 FreshRSS 环境</option>';
+$cfg = FreshRSS_Context::$user_conf;
+if ($cfg === null) {
+    echo '<p>用户配置未加载，请刷新页面重试。</p>';
+    return;
+}
+$selectedFeeds = $cfg->TMTTranslateFeeds ?? [];
+
+// Get all feeds
+$feeds = [];
+try {
+    if (class_exists('FreshRSS_Factory')) {
+        $feedDao = FreshRSS_Factory::createFeedDao();
+        if (method_exists($feedDao, 'listFeeds')) {
+            $feeds = $feedDao->listFeeds();
         }
-        ?>
-      </select>
-    </label>
-    <br><br>
+    }
+} catch (\Throwable $e) {
+    error_log('TMT-Translate: Failed to load feeds: ' . $e->getMessage());
+}
+?>
+<form action="<?php echo _url('extension', 'configure', 'e', urlencode($this->getName())); ?>" method="post">
+    <input type="hidden" name="_csrf" value="<?php echo FreshRSS_Auth::csrfToken(); ?>" />
 
-    <label>手动输入订阅源匹配（回退方案；逗号分隔，保留兼容旧版）<br>
-      <input type="text" name="feeds_manual" value="<?php echo htmlspecialchars($config['FeedsManual'] ?? ''); ?>" style="width:100%;">
-    </label>
-    <br><br>
+    <div class="panel">
+        <h2>TMT-Translate 配置</h2>
 
-    <button type="submit" class="btn">保存</button>
-  </form>
-  <p>提示：如果界面未列出订阅源，说明当前 FreshRSS 环境中未暴露期望的 `FreshRSS_Feed::all()` 接口，仍可使用手动输入。</p>
-</div>
+        <fieldset>
+            <legend>腾讯云 API 配置</legend>
+            <label>SecretId<br>
+                <input type="text" name="secret_id" value="<?php echo htmlspecialchars($cfg->TMTTranslateSecretId ?? ''); ?>" style="width:100%;">
+            </label>
+            <br>
+            <label>SecretKey<br>
+                <input type="text" name="secret_key" value="<?php echo htmlspecialchars($cfg->TMTTranslateSecretKey ?? ''); ?>" style="width:100%;">
+            </label>
+            <br>
+            <label>Region<br>
+                <input type="text" name="region" value="<?php echo htmlspecialchars($cfg->TMTTranslateRegion ?? 'ap-guangzhou'); ?>">
+            </label>
+            <br>
+            <label>Endpoint (e.g. tmt.tencentcloudapi.com)<br>
+                <input type="text" name="endpoint" value="<?php echo htmlspecialchars($cfg->TMTTranslateEndpoint ?? 'tmt.tencentcloudapi.com'); ?>">
+            </label>
+        </fieldset>
+
+        <fieldset style="margin-top: 20px;">
+            <legend>翻译设置</legend>
+            <label>
+                <input type="checkbox" name="translate_content" value="1" 
+                    <?php echo ($cfg->TMTTranslateContent ?? false) ? 'checked' : ''; ?>>
+                翻译文章正文（默认仅翻译标题）
+            </label>
+        </fieldset>
+
+        <fieldset style="margin-top: 20px;">
+            <legend>选择需要翻译的订阅源</legend>
+            <?php if (empty($feeds)): ?>
+                <p>暂无订阅源，请先添加订阅源</p>
+            <?php else: ?>
+                <ul style="list-style: none; padding: 0;">
+                    <?php foreach ($feeds as $id => $feed): ?>
+                        <li style="margin-bottom: 10px;">
+                            <label>
+                                <input type="checkbox" name="TMTTranslateFeeds[<?php echo htmlspecialchars((string)$id); ?>]" value="1" 
+                                    <?php echo (isset($selectedFeeds[$id]) && $selectedFeeds[$id] === '1') ? 'checked' : ''; ?>>
+                                <?php echo htmlspecialchars($feed->name()); ?> 
+                                <span style="color: #999; font-size: 0.9em;">(ID: <?php echo htmlspecialchars((string)$id); ?>)</span>
+                            </label>
+                        </li>
+                    <?php endforeach; ?>
+                </ul>
+            <?php endif; ?>
+        </fieldset>
+
+        <div style="margin-top: 20px;">
+            <button type="submit" class="btn btn-important">保存</button>
+            <button type="reset" class="btn">重置</button>
+        </div>
+    </div>
+</form>
