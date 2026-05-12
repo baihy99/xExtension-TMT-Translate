@@ -309,8 +309,9 @@ class TMTClient
     private string $endpoint;
     private string $service = 'tmt';
     private string $version = '2018-03-21';
-    private static float $lastRequestTime = 0;
-    private const MIN_INTERVAL = 0.25;
+    
+    private static array $requestTimestamps = [];
+    private const MAX_REQUESTS_PER_SECOND = 5;
 
     public function __construct(string $secretId, string $secretKey, string $region = 'ap-guangzhou', string $endpoint = 'tmt.tencentcloudapi.com')
     {
@@ -325,21 +326,31 @@ class TMTClient
         }
     }
 
-    private function applyRateLimit(): void
+    private function throttleRequest(): void
     {
         $now = microtime(true);
-        $elapsed = $now - self::$lastRequestTime;
+        self::$requestTimestamps = array_filter(self::$requestTimestamps, function ($timestamp) use ($now) {
+            return $now - $timestamp < 1;
+        });
 
-        if ($elapsed < self::MIN_INTERVAL) {
-            usleep((int)((self::MIN_INTERVAL - $elapsed) * 1000000));
+        if (count(self::$requestTimestamps) >= self::MAX_REQUESTS_PER_SECOND) {
+            $oldest = reset(self::$requestTimestamps);
+            $waitTime = 1 - ($now - $oldest);
+            if ($waitTime > 0) {
+                usleep((int)($waitTime * 1000000));
+            }
+            $now = microtime(true);
+            self::$requestTimestamps = array_filter(self::$requestTimestamps, function ($timestamp) use ($now) {
+                return $now - $timestamp < 1;
+            });
         }
 
-        self::$lastRequestTime = microtime(true);
+        self::$requestTimestamps[] = microtime(true);
     }
 
     public function translate(string $text, string $source = 'en', string $target = 'zh'): ?string
     {
-        $this->applyRateLimit();
+        $this->throttleRequest();
 
         if (class_exists('\\TencentCloud\\Tmt\\V20180321\\TmtClient')) {
             try {
